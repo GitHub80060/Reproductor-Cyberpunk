@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -54,13 +55,38 @@ import kotlin.math.sin
 
 // ───────────────────────── Paleta y tipografía ─────────────────────────
 
+/** Un tema de color: acento principal, acento secundario, color de alerta y fondos. */
+class NeonTheme(
+    val name: String,
+    val primary: Color,
+    val secondary: Color,
+    val alert: Color,
+    val bg: Color,
+    val panel: Color,
+    val panel2: Color
+)
+
+val NeonThemes = listOf(
+    NeonTheme("VOLT", Color(0xFFFCEE0A), Color(0xFF00F0FF), Color(0xFFFF003C), Color(0xFF07070B), Color(0xFF0F0F16), Color(0xFF171721)),
+    NeonTheme("ROSA NEÓN", Color(0xFFFF2A6D), Color(0xFF05D9E8), Color(0xFFFFF200), Color(0xFF0A060C), Color(0xFF130E16), Color(0xFF1C1522)),
+    NeonTheme("ÁCIDO", Color(0xFF39FF14), Color(0xFFFF00E5), Color(0xFFFF3B3B), Color(0xFF050A06), Color(0xFF0C140E), Color(0xFF131E16)),
+    NeonTheme("ÁRTICO", Color(0xFF00F0FF), Color(0xFFB388FF), Color(0xFFFF4D6D), Color(0xFF05090D), Color(0xFF0C131A), Color(0xFF131C26)),
+    NeonTheme("SOLAR", Color(0xFFFF8A00), Color(0xFF00D1FF), Color(0xFFFF003C), Color(0xFF0B0705), Color(0xFF16100C), Color(0xFF201812)),
+    NeonTheme("VIOLETA", Color(0xFFB026FF), Color(0xFF00F0FF), Color(0xFFFF2A6D), Color(0xFF09060F), Color(0xFF110C1A), Color(0xFF1A1426))
+)
+
+/** Colores actuales de la app. Al cambiar [themeIndex] toda la interfaz se redibuja con la nueva paleta. */
 object Cy {
-    val Bg = Color(0xFF07070B)
-    val Panel = Color(0xFF0F0F16)
-    val Panel2 = Color(0xFF171721)
-    val Yellow = Color(0xFFFCEE0A)
-    val Cyan = Color(0xFF00F0FF)
-    val Red = Color(0xFFFF003C)
+    var themeIndex by mutableIntStateOf(0)
+
+    private val t: NeonTheme get() = NeonThemes[themeIndex.coerceIn(0, NeonThemes.lastIndex)]
+
+    val Bg: Color get() = t.bg
+    val Panel: Color get() = t.panel
+    val Panel2: Color get() = t.panel2
+    val Primary: Color get() = t.primary
+    val Secondary: Color get() = t.secondary
+    val Alert: Color get() = t.alert
     val Dim = Color(0xFF7C7C92)
     val Text = Color(0xFFE9E9F2)
 }
@@ -93,7 +119,7 @@ fun Modifier.cyberBackground(): Modifier = this
     .background(Cy.Bg)
     .drawBehind {
         val step = 44.dp.toPx()
-        val grid = Cy.Cyan.copy(alpha = 0.04f)
+        val grid = Cy.Secondary.copy(alpha = 0.04f)
         var x = 0f
         while (x <= size.width) {
             drawLine(grid, Offset(x, 0f), Offset(x, size.height), 1f)
@@ -106,14 +132,14 @@ fun Modifier.cyberBackground(): Modifier = this
         }
         drawRect(
             Brush.radialGradient(
-                colors = listOf(Cy.Red.copy(alpha = 0.12f), Color.Transparent),
+                colors = listOf(Cy.Alert.copy(alpha = 0.12f), Color.Transparent),
                 center = Offset(size.width, 0f),
                 radius = size.width * 1.1f
             )
         )
         drawRect(
             Brush.radialGradient(
-                colors = listOf(Cy.Cyan.copy(alpha = 0.09f), Color.Transparent),
+                colors = listOf(Cy.Secondary.copy(alpha = 0.09f), Color.Transparent),
                 center = Offset(0f, size.height),
                 radius = size.width * 1.1f
             )
@@ -156,12 +182,12 @@ fun GlitchText(text: String, style: TextStyle, modifier: Modifier = Modifier) {
     Box(modifier) {
         Text(
             text = text,
-            style = style.copy(color = Cy.Red.copy(alpha = 0.85f)),
+            style = style.copy(color = Cy.Alert.copy(alpha = 0.85f)),
             modifier = Modifier.graphicsLayer { translationX = (1.3f + shift.value * 7f) * density }
         )
         Text(
             text = text,
-            style = style.copy(color = Cy.Cyan.copy(alpha = 0.85f)),
+            style = style.copy(color = Cy.Secondary.copy(alpha = 0.85f)),
             modifier = Modifier.graphicsLayer { translationX = -(1.3f + shift.value * 7f) * density }
         )
         Text(text = text, style = style)
@@ -170,7 +196,7 @@ fun GlitchText(text: String, style: TextStyle, modifier: Modifier = Modifier) {
 
 // ───────────────────────── Íconos dibujados a mano (angulares) ─────────────────────────
 
-enum class Ico { PLAY, PAUSE, NEXT, PREV, SHUFFLE, REPEAT, REPEAT_ONE, LIB, DECK, EQ, SEARCH, REFRESH }
+enum class Ico { PLAY, PAUSE, NEXT, PREV, SHUFFLE, REPEAT, REPEAT_ONE, LIB, DECK, EQ, SEARCH, REFRESH, USER }
 
 private fun DrawScope.poly(color: Color, s: Float, vararg pts: Float) {
     val path = Path()
@@ -251,6 +277,10 @@ fun CyberIcon(ico: Ico, color: Color, modifier: Modifier = Modifier.size(24.dp))
                 drawCircle(color = color, radius = 6f * s, center = Offset(10f * s, 10f * s), style = Stroke(width = 2f * s))
                 seg(color, s, 14.5f, 14.5f, 20f, 20f)
             }
+            Ico.USER -> {
+                drawCircle(color = color, radius = 4.5f * s, center = Offset(12f * s, 8f * s))
+                poly(color, s, 4f, 21f, 6f, 15f, 18f, 15f, 20f, 21f)
+            }
             Ico.REFRESH -> {
                 drawArc(
                     color = color,
@@ -275,7 +305,7 @@ fun CyberIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     size: Dp = 48.dp,
-    color: Color = Cy.Yellow,
+    color: Color = Cy.Primary,
     filled: Boolean = false,
     iconSize: Dp = 22.dp
 ) {
@@ -298,7 +328,7 @@ fun CyberTextButton(
     label: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    color: Color = Cy.Yellow,
+    color: Color = Cy.Primary,
     filled: Boolean = false
 ) {
     val shape = CutCornerShape(topStart = 8.dp, bottomEnd = 8.dp)
@@ -321,7 +351,7 @@ fun CyberTextButton(
 }
 
 fun Modifier.cutPanel(
-    border: Color = Cy.Yellow.copy(alpha = 0.45f),
+    border: Color = Cy.Primary.copy(alpha = 0.45f),
     fill: Color = Cy.Panel,
     cut: Dp = 14.dp
 ): Modifier {
@@ -339,7 +369,7 @@ fun NeonSlider(
     value: Float,
     onChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
-    color: Color = Cy.Yellow,
+    color: Color = Cy.Primary,
     onFinish: () -> Unit = {},
     segments: Int = 36,
     height: Dp = 32.dp
@@ -427,9 +457,9 @@ fun SpectrumBars(playing: Boolean, modifier: Modifier = Modifier) {
             for (b in 0 until blocks) {
                 val y = size.height - (b + 1) * (blockH + blockGap) + blockGap
                 val c = when {
-                    b >= maxBlocks * 0.8f -> Cy.Red
-                    b >= maxBlocks * 0.5f -> Cy.Yellow
-                    else -> Cy.Cyan
+                    b >= maxBlocks * 0.8f -> Cy.Alert
+                    b >= maxBlocks * 0.5f -> Cy.Primary
+                    else -> Cy.Secondary
                 }
                 drawRect(c, Offset(i * (bw + gap), y), Size(bw, blockH))
             }
@@ -443,13 +473,13 @@ fun SpectrumBars(playing: Boolean, modifier: Modifier = Modifier) {
 fun NoSignalArt(modifier: Modifier = Modifier) {
     Box(modifier.background(Cy.Panel2), contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxSize()) {
-            val c = Cy.Yellow.copy(alpha = 0.07f)
+            val c = Cy.Primary.copy(alpha = 0.07f)
             var k = 0f
             while (k < size.width + size.height) {
                 drawLine(c, Offset(k, 0f), Offset(k - size.height, size.height), 2.dp.toPx())
                 k += 18.dp.toPx()
             }
         }
-        GlitchText("NO SIGNAL", tx(22.sp, Cy.Yellow, Orbitron, FontWeight.Bold, 2.sp))
+        GlitchText("NO SIGNAL", tx(22.sp, Cy.Primary, Orbitron, FontWeight.Bold, 2.sp))
     }
 }

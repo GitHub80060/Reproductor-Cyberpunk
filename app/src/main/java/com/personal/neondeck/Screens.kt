@@ -1,10 +1,13 @@
 package com.personal.neondeck
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -40,10 +43,12 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -53,17 +58,21 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.media3.common.Player
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import kotlin.random.Random
@@ -72,9 +81,18 @@ import kotlin.random.Random
 
 @Composable
 fun NeonApp() {
+    // Barra de estado y de navegación del mismo color que el fondo del tema
+    val view = LocalView.current
+    val barColor = Cy.Bg.toArgb()
+    SideEffect {
+        val window = (view.context as? Activity)?.window
+        window?.statusBarColor = barColor
+        window?.navigationBarColor = barColor
+    }
+
     MaterialTheme(
         colorScheme = darkColorScheme(
-            primary = Cy.Yellow,
+            primary = Cy.Primary,
             background = Cy.Bg,
             surface = Cy.Panel,
             onSurface = Cy.Text
@@ -123,6 +141,36 @@ private fun NeonRoot() {
             loaded = true
         }
     }
+    // Ajustes que se recuerdan: carpeta elegida ("" = toda la música), alias y tema de color
+    val uiPrefs = remember { appCtx.getSharedPreferences("neon_ui", Context.MODE_PRIVATE) }
+    var folder by remember { mutableStateOf(uiPrefs.getString("folder", "") ?: "") }
+    var alias by remember { mutableStateOf(uiPrefs.getString("alias", "") ?: "") }
+    val scope = rememberCoroutineScope()
+
+    val chooseFolder: (String) -> Unit = { path ->
+        folder = path
+        uiPrefs.edit().putString("folder", path).apply()
+    }
+    // Selector de carpetas de Android: no necesita ningún permiso extra
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            val path = treeUriToPath(uri)
+            if (path != null) chooseFolder(path)
+        }
+    }
+
+    // Avatar del perfil (se guarda dentro de la app)
+    var avatar by remember { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(Unit) { avatar = withContext(Dispatchers.IO) { loadAvatar(appCtx) } }
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) { saveAvatar(appCtx, uri) }
+                if (ok) avatar = withContext(Dispatchers.IO) { loadAvatar(appCtx) }
+            }
+        }
+    }
+
     val byId = remember(tracks) { tracks.associateBy { it.id.toString() } }
     val current = pc.mediaId?.let { byId[it] }
     val art by produceState<Bitmap?>(null, current?.id) {
@@ -140,7 +188,7 @@ private fun NeonRoot() {
     var tab by rememberSaveable { mutableStateOf(0) }
 
     Column(Modifier.fillMaxSize().cyberBackground()) {
-        Header()
+        Header(avatar = avatar, alias = alias, onProfile = { tab = 3 })
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {
                 0 -> LibraryScreen(
@@ -148,6 +196,9 @@ private fun NeonRoot() {
                     loaded = loaded,
                     granted = granted,
                     currentId = pc.mediaId,
+                    folder = folder,
+                    onFolder = chooseFolder,
+                    onPickFolder = { folderPicker.launch(null) },
                     onAsk = { askPermissions() },
                     onReload = { reloadKey++ },
                     onPlay = { list, index, shuffleOn ->
@@ -156,7 +207,30 @@ private fun NeonRoot() {
                     }
                 )
                 1 -> PlayerScreen(pc = pc, art = art)
-                else -> AudioScreen()
+                2 -> AudioScreen()
+                else -> ProfileScreen(
+                    avatar = avatar,
+                    alias = alias,
+                    onAlias = {
+                        alias = it
+                        uiPrefs.edit().putString("alias", it).apply()
+                    },
+                    onPickAvatar = {
+                        avatarPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    onRemoveAvatar = {
+                        deleteAvatar(appCtx)
+                        avatar = null
+                    },
+                    trackCount = tracks.size,
+                    folderCount = tracks.map { it.folder }.distinct().size,
+                    onTheme = {
+                        Cy.themeIndex = it
+                        uiPrefs.edit().putInt("theme", it).apply()
+                    }
+                )
             }
         }
         if (tab != 1 && pc.mediaId != null) {
@@ -169,7 +243,7 @@ private fun NeonRoot() {
 // ───────────────────────── Cabecera y navegación ─────────────────────────
 
 @Composable
-private fun Header() {
+private fun Header(avatar: Bitmap?, alias: String, onProfile: () -> Unit) {
     val blink = rememberInfiniteTransition(label = "blink").animateFloat(
         initialValue = 0.25f,
         targetValue = 1f,
@@ -181,21 +255,57 @@ private fun Header() {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            GlitchText("NEON//DECK", tx(24.sp, Cy.Yellow, Orbitron, FontWeight.Bold, 2.sp))
-            Text("AUDIO.SYS  ·  ONLINE", style = tx(12.sp, Cy.Cyan, Rajdhani, FontWeight.Bold, 3.sp))
+            GlitchText("NEON//DECK", tx(24.sp, Cy.Primary, Orbitron, FontWeight.Bold, 2.sp))
+            Text(
+                if (alias.isBlank()) "AUDIO.SYS  ·  ONLINE" else "USER  ·  ${alias.trim().uppercase()}",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = tx(12.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 3.sp)
+            )
         }
         Box(
             Modifier
-                .size(12.dp)
-                .background(Cy.Red.copy(alpha = blink.value))
+                .size(10.dp)
+                .background(Cy.Alert.copy(alpha = blink.value))
         )
+        Spacer(Modifier.width(12.dp))
+        AvatarBadge(avatar, alias, 42.dp, Modifier.clickable(onClick = onProfile))
     }
     Box(
         Modifier
             .fillMaxWidth()
             .height(2.dp)
-            .background(Brush.horizontalGradient(listOf(Cy.Yellow, Cy.Red, Color.Transparent)))
+            .background(Brush.horizontalGradient(listOf(Cy.Primary, Cy.Alert, Color.Transparent)))
     )
+}
+
+/** Foto de perfil en marco angular. Si no hay foto, muestra la inicial del alias. */
+@Composable
+private fun AvatarBadge(avatar: Bitmap?, alias: String, size: Dp, modifier: Modifier = Modifier) {
+    val shape = CutCornerShape(topStart = size / 4, bottomEnd = size / 4)
+    val big = size > 60.dp
+    Box(
+        modifier
+            .size(size)
+            .clip(shape)
+            .background(Cy.Panel2)
+            .border(if (big) 2.dp else 1.5.dp, Cy.Primary, shape),
+        contentAlignment = Alignment.Center
+    ) {
+        if (avatar != null) {
+            Image(
+                bitmap = avatar.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text(
+                alias.trim().take(1).uppercase().ifEmpty { "?" },
+                style = tx(if (big) 52.sp else 18.sp, Cy.Primary, Orbitron, FontWeight.Bold)
+            )
+        }
+    }
 }
 
 @Composable
@@ -204,12 +314,13 @@ private fun NavBar(selected: Int, onSelect: (Int) -> Unit) {
         Modifier
             .fillMaxWidth()
             .background(Cy.Panel)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         NavItem("LISTA", Ico.LIB, selected == 0, Modifier.weight(1f)) { onSelect(0) }
         NavItem("DECK", Ico.DECK, selected == 1, Modifier.weight(1f)) { onSelect(1) }
         NavItem("AUDIO", Ico.EQ, selected == 2, Modifier.weight(1f)) { onSelect(2) }
+        NavItem("PERFIL", Ico.USER, selected == 3, Modifier.weight(1f)) { onSelect(3) }
     }
 }
 
@@ -221,15 +332,15 @@ private fun NavItem(label: String, ico: Ico, active: Boolean, modifier: Modifier
         modifier
             .height(44.dp)
             .clip(shape)
-            .background(if (active) Cy.Yellow else Color.Transparent)
-            .border(1.dp, if (active) Cy.Yellow else Cy.Dim.copy(alpha = 0.4f), shape)
+            .background(if (active) Cy.Primary else Color.Transparent)
+            .border(1.dp, if (active) Cy.Primary else Cy.Dim.copy(alpha = 0.4f), shape)
             .clickable(onClick = onClick),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        CyberIcon(ico, fg, Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, maxLines = 1, style = tx(14.sp, fg, Rajdhani, FontWeight.Bold, 1.5.sp))
+        CyberIcon(ico, fg, Modifier.size(15.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(label, maxLines = 1, style = tx(12.sp, fg, Rajdhani, FontWeight.Bold, 0.8.sp))
     }
 }
 
@@ -239,7 +350,7 @@ private fun MiniPlayer(pc: PlayerController, onOpen: () -> Unit) {
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .cutPanel(border = Cy.Yellow.copy(alpha = 0.6f), fill = Cy.Panel2, cut = 12.dp)
+            .cutPanel(border = Cy.Primary.copy(alpha = 0.6f), fill = Cy.Panel2, cut = 12.dp)
             .clickable(onClick = onOpen)
             .padding(start = 14.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -249,16 +360,16 @@ private fun MiniPlayer(pc: PlayerController, onOpen: () -> Unit) {
                 pc.title.ifBlank { "—" },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                style = tx(16.sp, Cy.Yellow, Rajdhani, FontWeight.Bold)
+                style = tx(16.sp, Cy.Primary, Rajdhani, FontWeight.Bold)
             )
             Text(
                 pc.artist,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                style = tx(13.sp, Cy.Cyan, Rajdhani, FontWeight.Medium)
+                style = tx(13.sp, Cy.Secondary, Rajdhani, FontWeight.Medium)
             )
         }
-        CyberIconButton(Ico.PREV, { pc.previous() }, size = 40.dp, color = Cy.Cyan, iconSize = 18.dp)
+        CyberIconButton(Ico.PREV, { pc.previous() }, size = 40.dp, color = Cy.Secondary, iconSize = 18.dp)
         Spacer(Modifier.width(6.dp))
         CyberIconButton(
             if (pc.playing) Ico.PAUSE else Ico.PLAY,
@@ -268,11 +379,14 @@ private fun MiniPlayer(pc: PlayerController, onOpen: () -> Unit) {
             iconSize = 20.dp
         )
         Spacer(Modifier.width(6.dp))
-        CyberIconButton(Ico.NEXT, { pc.next() }, size = 40.dp, color = Cy.Cyan, iconSize = 18.dp)
+        CyberIconButton(Ico.NEXT, { pc.next() }, size = 40.dp, color = Cy.Secondary, iconSize = 18.dp)
     }
 }
 
 // ───────────────────────── Biblioteca ─────────────────────────
+
+private fun folderName(path: String): String =
+    if (path == "/") "RAÍZ" else path.trim('/').substringAfterLast('/').ifEmpty { path }
 
 @Composable
 private fun LibraryScreen(
@@ -280,14 +394,25 @@ private fun LibraryScreen(
     loaded: Boolean,
     granted: Boolean,
     currentId: String?,
+    folder: String,
+    onFolder: (String) -> Unit,
+    onPickFolder: () -> Unit,
     onAsk: () -> Unit,
     onReload: () -> Unit,
     onPlay: (List<Track>, Int, Boolean?) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
-    val filtered = remember(tracks, query) {
-        if (query.isBlank()) tracks
-        else tracks.filter { it.title.contains(query, ignoreCase = true) || it.artist.contains(query, ignoreCase = true) }
+
+    // Carpetas que tienen música, con cuántas canciones hay en cada una
+    val folders = remember(tracks) {
+        tracks.groupingBy { it.folder }.eachCount().toList().sortedBy { it.first.lowercase() }
+    }
+    val inFolder = remember(tracks, folder) {
+        if (folder.isEmpty()) tracks else tracks.filter { it.inFolder(folder) }
+    }
+    val filtered = remember(inFolder, query) {
+        if (query.isBlank()) inFolder
+        else inFolder.filter { it.title.contains(query, ignoreCase = true) || it.artist.contains(query, ignoreCase = true) }
     }
     val searchShape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp)
 
@@ -302,17 +427,17 @@ private fun LibraryScreen(
                 onValueChange = { query = it },
                 singleLine = true,
                 textStyle = tx(16.sp, Cy.Text, Rajdhani, FontWeight.Medium),
-                cursorBrush = SolidColor(Cy.Yellow),
+                cursorBrush = SolidColor(Cy.Primary),
                 modifier = Modifier
                     .weight(1f)
                     .height(44.dp)
                     .clip(searchShape)
                     .background(Cy.Panel)
-                    .border(1.dp, Cy.Cyan.copy(alpha = 0.5f), searchShape)
+                    .border(1.dp, Cy.Secondary.copy(alpha = 0.5f), searchShape)
                     .padding(horizontal = 12.dp),
                 decorationBox = { inner ->
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxSize()) {
-                        CyberIcon(Ico.SEARCH, Cy.Cyan, Modifier.size(18.dp))
+                        CyberIcon(Ico.SEARCH, Cy.Secondary, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                             if (query.isEmpty()) {
@@ -331,7 +456,42 @@ private fun LibraryScreen(
                 size = 44.dp,
                 iconSize = 20.dp
             )
-            CyberIconButton(Ico.REFRESH, onClick = onReload, size = 44.dp, color = Cy.Cyan, iconSize = 20.dp)
+            CyberIconButton(Ico.REFRESH, onClick = onReload, size = 44.dp, color = Cy.Secondary, iconSize = 20.dp)
+        }
+
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Abre el selector de carpetas de Android
+            CyberTextButton(label = "ELEGIR CARPETA", onClick = onPickFolder, color = Cy.Primary)
+            CyberTextButton(
+                label = "TODO (${tracks.size})",
+                onClick = { onFolder("") },
+                color = Cy.Secondary,
+                filled = folder.isEmpty()
+            )
+            // Carpeta elegida con el selector que no coincide con ninguna de la lista (por ejemplo, una carpeta madre)
+            val custom = folder.isNotEmpty() && folders.none { it.first.equals(folder, ignoreCase = true) }
+            if (custom) {
+                CyberTextButton(
+                    label = "${folderName(folder).uppercase()} (${inFolder.size})",
+                    onClick = {},
+                    color = Cy.Secondary,
+                    filled = true
+                )
+            }
+            for ((path, count) in folders) {
+                CyberTextButton(
+                    label = "${folderName(path).uppercase()} ($count)",
+                    onClick = { onFolder(path) },
+                    color = Cy.Secondary,
+                    filled = folder.equals(path, ignoreCase = true)
+                )
+            }
         }
 
         Text(
@@ -352,6 +512,12 @@ private fun LibraryScreen(
                 text = "No encontré canciones. Copia archivos de audio (MP3, FLAC, M4A…) a tu teléfono y pulsa el botón de recargar.",
                 button = "RECARGAR",
                 onButton = onReload
+            )
+            loaded && inFolder.isEmpty() -> InfoPanel(
+                title = "CARPETA VACÍA",
+                text = "No encontré canciones en esa carpeta. Android solo muestra la música que ya tiene registrada: prueba con otra carpeta o pulsa recargar.",
+                button = "VER TODO",
+                onButton = { onFolder("") }
             )
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 itemsIndexed(filtered, key = { _, t -> t.id }) { index, t ->
@@ -377,7 +543,7 @@ private fun InfoPanel(title: String, text: String, button: String, onButton: () 
             .padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text(title, style = tx(18.sp, Cy.Red, Orbitron, FontWeight.Bold, 2.sp))
+        Text(title, style = tx(18.sp, Cy.Alert, Orbitron, FontWeight.Bold, 2.sp))
         Text(text, style = tx(16.sp, Cy.Text, Rajdhani, FontWeight.Medium))
         CyberTextButton(button, onButton, filled = true)
     }
@@ -388,7 +554,7 @@ private fun TrackRow(index: Int, track: Track, active: Boolean, onClick: () -> U
     Row(
         Modifier
             .fillMaxWidth()
-            .background(if (active) Cy.Yellow.copy(alpha = 0.08f) else Color.Transparent)
+            .background(if (active) Cy.Primary.copy(alpha = 0.08f) else Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -397,12 +563,12 @@ private fun TrackRow(index: Int, track: Track, active: Boolean, onClick: () -> U
             Modifier
                 .width(3.dp)
                 .height(36.dp)
-                .background(if (active) Cy.Yellow else Color.Transparent)
+                .background(if (active) Cy.Primary else Color.Transparent)
         )
         Spacer(Modifier.width(10.dp))
         Text(
             "%02d".format(index + 1),
-            style = tx(12.sp, if (active) Cy.Yellow else Cy.Dim, Orbitron, FontWeight.Normal),
+            style = tx(12.sp, if (active) Cy.Primary else Cy.Dim, Orbitron, FontWeight.Normal),
             modifier = Modifier.width(38.dp)
         )
         Column(Modifier.weight(1f)) {
@@ -410,7 +576,7 @@ private fun TrackRow(index: Int, track: Track, active: Boolean, onClick: () -> U
                 track.title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                style = tx(17.sp, if (active) Cy.Yellow else Cy.Text, Rajdhani, FontWeight.Bold)
+                style = tx(17.sp, if (active) Cy.Primary else Cy.Text, Rajdhani, FontWeight.Bold)
             )
             Text(
                 track.artist,
@@ -420,7 +586,7 @@ private fun TrackRow(index: Int, track: Track, active: Boolean, onClick: () -> U
             )
         }
         Spacer(Modifier.width(8.dp))
-        Text(formatTime(track.durationMs), style = tx(13.sp, Cy.Cyan, Rajdhani, FontWeight.Bold))
+        Text(formatTime(track.durationMs), style = tx(13.sp, Cy.Secondary, Rajdhani, FontWeight.Bold))
     }
 }
 
@@ -448,7 +614,7 @@ private fun PlayerScreen(pc: PlayerController, art: Bitmap?) {
                 .aspectRatio(1f)
                 .clip(frame)
                 .background(Cy.Panel2)
-                .border(2.dp, Cy.Yellow, frame)
+                .border(2.dp, Cy.Primary, frame)
         ) {
             if (art != null) {
                 Image(
@@ -471,7 +637,7 @@ private fun PlayerScreen(pc: PlayerController, art: Bitmap?) {
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 22.dp, bottom = 10.dp)
-                    .background(Cy.Cyan)
+                    .background(Cy.Secondary)
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             )
         }
@@ -482,7 +648,7 @@ private fun PlayerScreen(pc: PlayerController, art: Bitmap?) {
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
-            style = tx(20.sp, Cy.Yellow, Orbitron, FontWeight.Bold, 1.sp)
+            style = tx(20.sp, Cy.Primary, Orbitron, FontWeight.Bold, 1.sp)
         )
         Spacer(Modifier.height(4.dp))
         Text(
@@ -490,7 +656,7 @@ private fun PlayerScreen(pc: PlayerController, art: Bitmap?) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
-            style = tx(17.sp, Cy.Cyan, Rajdhani, FontWeight.Bold, 2.sp)
+            style = tx(17.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 2.sp)
         )
 
         Spacer(Modifier.height(14.dp))
@@ -505,7 +671,7 @@ private fun PlayerScreen(pc: PlayerController, art: Bitmap?) {
             segments = 40
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatTime(shownPosition), style = tx(13.sp, Cy.Cyan, Rajdhani, FontWeight.Bold, 1.sp))
+            Text(formatTime(shownPosition), style = tx(13.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 1.sp))
             Text(formatTime(pc.duration), style = tx(13.sp, Cy.Dim, Rajdhani, FontWeight.Bold, 1.sp))
         }
 
@@ -518,7 +684,7 @@ private fun PlayerScreen(pc: PlayerController, art: Bitmap?) {
             CyberIconButton(
                 Ico.SHUFFLE, { pc.toggleShuffle() },
                 size = 44.dp,
-                color = if (pc.shuffle) Cy.Cyan else Cy.Dim,
+                color = if (pc.shuffle) Cy.Secondary else Cy.Dim,
                 iconSize = 20.dp
             )
             CyberIconButton(Ico.PREV, { pc.previous() }, size = 52.dp, iconSize = 22.dp)
@@ -534,7 +700,7 @@ private fun PlayerScreen(pc: PlayerController, art: Bitmap?) {
                 if (pc.repeat == Player.REPEAT_MODE_ONE) Ico.REPEAT_ONE else Ico.REPEAT,
                 { pc.cycleRepeat() },
                 size = 44.dp,
-                color = if (pc.repeat == Player.REPEAT_MODE_OFF) Cy.Dim else Cy.Cyan,
+                color = if (pc.repeat == Player.REPEAT_MODE_OFF) Cy.Dim else Cy.Secondary,
                 iconSize = 20.dp
             )
         }
@@ -561,13 +727,13 @@ private fun AudioScreen() {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("ECUALIZADOR", style = tx(20.sp, Cy.Yellow, Orbitron, FontWeight.Bold, 2.sp))
-                Text("AUDIO.SYS // TUNING", style = tx(12.sp, Cy.Cyan, Rajdhani, FontWeight.Bold, 2.sp))
+                Text("ECUALIZADOR", style = tx(20.sp, Cy.Primary, Orbitron, FontWeight.Bold, 2.sp))
+                Text("AUDIO.SYS // TUNING", style = tx(12.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 2.sp))
             }
             CyberTextButton(
                 label = if (Fx.enabledState) "ON" else "OFF",
                 onClick = { Fx.toggleEnabled() },
-                color = if (Fx.enabledState) Cy.Cyan else Cy.Dim,
+                color = if (Fx.enabledState) Cy.Secondary else Cy.Dim,
                 filled = Fx.enabledState
             )
         }
@@ -589,7 +755,7 @@ private fun AudioScreen() {
                     CyberTextButton(
                         label = name,
                         onClick = { Fx.choosePreset(name) },
-                        color = Cy.Yellow,
+                        color = Cy.Primary,
                         filled = Fx.presetName == name
                     )
                 }
@@ -607,14 +773,14 @@ private fun AudioScreen() {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             freqLabel(Fx.freqs.getOrElse(i) { 0 }),
-                            style = tx(13.sp, Cy.Cyan, Rajdhani, FontWeight.Bold, 0.5.sp),
+                            style = tx(13.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 0.5.sp),
                             modifier = Modifier.width(56.dp)
                         )
                         NeonSlider(
                             value = (level - min).toFloat() / range,
                             onChange = { f -> Fx.changeBand(i, min + (f * range).roundToInt()) },
                             modifier = Modifier.weight(1f),
-                            color = Cy.Yellow,
+                            color = Cy.Primary,
                             segments = 24
                         )
                         Text(
@@ -634,16 +800,16 @@ private fun AudioScreen() {
 
         // Graves
         Column(
-            Modifier.fillMaxWidth().cutPanel(border = Cy.Red.copy(alpha = 0.55f)).padding(14.dp),
+            Modifier.fillMaxWidth().cutPanel(border = Cy.Alert.copy(alpha = 0.55f)).padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Text("REFUERZO DE GRAVES", style = tx(15.sp, Cy.Red, Rajdhani, FontWeight.Bold, 2.sp))
+            Text("REFUERZO DE GRAVES", style = tx(15.sp, Cy.Alert, Rajdhani, FontWeight.Bold, 2.sp))
             if (Fx.bassAvailable) {
                 NeonSlider(
                     value = Fx.bassStrength / 1000f,
                     onChange = { Fx.changeBass((it * 1000).roundToInt()) },
                     modifier = Modifier.fillMaxWidth(),
-                    color = Cy.Red,
+                    color = Cy.Alert,
                     segments = 30
                 )
                 Text("${Fx.bassStrength / 10}%", style = tx(13.sp, Cy.Text, Rajdhani, FontWeight.Bold))
@@ -654,16 +820,16 @@ private fun AudioScreen() {
 
         // Volumen extra
         Column(
-            Modifier.fillMaxWidth().cutPanel(border = Cy.Cyan.copy(alpha = 0.55f)).padding(14.dp),
+            Modifier.fillMaxWidth().cutPanel(border = Cy.Secondary.copy(alpha = 0.55f)).padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Text("VOLUMEN EXTRA", style = tx(15.sp, Cy.Cyan, Rajdhani, FontWeight.Bold, 2.sp))
+            Text("VOLUMEN EXTRA", style = tx(15.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 2.sp))
             if (Fx.loudAvailable) {
                 NeonSlider(
                     value = Fx.loudGain / 1000f,
                     onChange = { Fx.changeLoud((it * 1000).roundToInt()) },
                     modifier = Modifier.fillMaxWidth(),
-                    color = Cy.Cyan,
+                    color = Cy.Secondary,
                     segments = 30
                 )
                 Text("+%.1f dB".format(Fx.loudGain / 100f), style = tx(13.sp, Cy.Text, Rajdhani, FontWeight.Bold))
@@ -677,5 +843,140 @@ private fun AudioScreen() {
         }
 
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+// ───────────────────────── Perfil (foto, alias y colores) ─────────────────────────
+
+@Composable
+private fun ProfileScreen(
+    avatar: Bitmap?,
+    alias: String,
+    onAlias: (String) -> Unit,
+    onPickAvatar: () -> Unit,
+    onRemoveAvatar: () -> Unit,
+    trackCount: Int,
+    folderCount: Int,
+    onTheme: (Int) -> Unit
+) {
+    val fieldShape = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp)
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            Text("PERFIL", style = tx(20.sp, Cy.Primary, Orbitron, FontWeight.Bold, 2.sp))
+            Text("USER.SYS // IDENTIDAD", style = tx(12.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 2.sp))
+        }
+
+        AvatarBadge(avatar, alias, 150.dp)
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CyberTextButton(if (avatar == null) "SUBIR FOTO" else "CAMBIAR FOTO", onPickAvatar, filled = true)
+            if (avatar != null) {
+                CyberTextButton("QUITAR", onRemoveAvatar, color = Cy.Alert)
+            }
+        }
+
+        // Alias
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("ALIAS", style = tx(13.sp, Cy.Dim, Rajdhani, FontWeight.Bold, 2.sp))
+            BasicTextField(
+                value = alias,
+                onValueChange = { onAlias(it.take(20)) },
+                singleLine = true,
+                textStyle = tx(18.sp, Cy.Text, Rajdhani, FontWeight.Bold, 1.sp),
+                cursorBrush = SolidColor(Cy.Primary),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .clip(fieldShape)
+                    .background(Cy.Panel)
+                    .border(1.dp, Cy.Primary.copy(alpha = 0.6f), fieldShape)
+                    .padding(horizontal = 14.dp),
+                decorationBox = { inner ->
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                        if (alias.isEmpty()) {
+                            Text(
+                                "Escribe tu nombre o apodo",
+                                style = tx(16.sp, Cy.Dim, Rajdhani, FontWeight.Medium)
+                            )
+                        }
+                        inner()
+                    }
+                }
+            )
+        }
+
+        // Estadísticas de la biblioteca
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            StatBox("PISTAS", trackCount.toString(), Cy.Primary, Modifier.weight(1f))
+            StatBox("CARPETAS", folderCount.toString(), Cy.Secondary, Modifier.weight(1f))
+        }
+
+        // Temas de color
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("COLORES", style = tx(13.sp, Cy.Dim, Rajdhani, FontWeight.Bold, 2.sp))
+            NeonThemes.chunked(2).forEachIndexed { rowIndex, pair ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    pair.forEachIndexed { i, theme ->
+                        val index = rowIndex * 2 + i
+                        ThemeCard(theme, Cy.themeIndex == index, Modifier.weight(1f)) { onTheme(index) }
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun StatBox(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .cutPanel(border = color.copy(alpha = 0.6f))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Text(value, style = tx(26.sp, color, Orbitron, FontWeight.Bold))
+        Text(label, style = tx(12.sp, Cy.Dim, Rajdhani, FontWeight.Bold, 2.sp))
+    }
+}
+
+@Composable
+private fun ThemeCard(theme: NeonTheme, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = CutCornerShape(topStart = 12.dp, bottomEnd = 12.dp)
+    Row(
+        modifier
+            .height(64.dp)
+            .clip(shape)
+            .background(theme.panel)
+            .border(
+                if (selected) 2.5.dp else 1.dp,
+                if (selected) theme.primary else Cy.Dim.copy(alpha = 0.4f),
+                shape
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(theme.name, maxLines = 1, style = tx(14.sp, theme.primary, Rajdhani, FontWeight.Bold, 1.sp))
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(Modifier.size(width = 22.dp, height = 8.dp).background(theme.primary))
+                Box(Modifier.size(width = 14.dp, height = 8.dp).background(theme.secondary))
+                Box(Modifier.size(width = 8.dp, height = 8.dp).background(theme.alert))
+            }
+        }
+        if (selected) {
+            Text("ON", style = tx(12.sp, theme.primary, Orbitron, FontWeight.Normal))
+        }
     }
 }
