@@ -78,8 +78,9 @@ class PlayerController(private val ctx: Context) : Player.Listener {
         val c = controller ?: return
         playing = c.playWhenReady && c.playbackState != Player.STATE_ENDED
         mediaId = c.currentMediaItem?.mediaId?.takeIf { it.isNotEmpty() && it != MediaItem.DEFAULT_MEDIA_ID }
-        title = c.mediaMetadata.title?.toString().orEmpty()
-        artist = c.mediaMetadata.artist?.toString().orEmpty()
+        // Defensa extra: lo que se muestra siempre pasa por la limpieza de texto plano
+        title = sanitizeText(c.mediaMetadata.title?.toString(), "")
+        artist = sanitizeText(c.mediaMetadata.artist?.toString(), "")
         duration = if (c.duration == C.TIME_UNSET) 0L else c.duration
         position = c.currentPosition
         shuffle = c.shuffleModeEnabled
@@ -109,6 +110,14 @@ class PlayerController(private val ctx: Context) : Player.Listener {
         }
         c.prepare()
         c.play()
+    }
+
+    /** Detiene todo y vacía la lista (se usa al cambiar de carpeta, porque el permiso de la anterior se suelta). */
+    fun stopAndClear() {
+        val c = controller ?: return
+        c.stop()
+        c.clearMediaItems()
+        lastQueue = emptyList()
     }
 
     fun togglePlay() {
@@ -153,7 +162,6 @@ class PlayerController(private val ctx: Context) : Player.Listener {
                     .setTitle(title)
                     .setArtist(artist)
                     .setAlbumTitle(album)
-                    .setArtworkUri(albumArtUri(albumId))
                     .build()
             )
             .build()

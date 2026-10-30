@@ -72,7 +72,16 @@ val NeonThemes = listOf(
     NeonTheme("ÁCIDO", Color(0xFF39FF14), Color(0xFFFF00E5), Color(0xFFFF3B3B), Color(0xFF050A06), Color(0xFF0C140E), Color(0xFF131E16)),
     NeonTheme("ÁRTICO", Color(0xFF00F0FF), Color(0xFFB388FF), Color(0xFFFF4D6D), Color(0xFF05090D), Color(0xFF0C131A), Color(0xFF131C26)),
     NeonTheme("SOLAR", Color(0xFFFF8A00), Color(0xFF00D1FF), Color(0xFFFF003C), Color(0xFF0B0705), Color(0xFF16100C), Color(0xFF201812)),
-    NeonTheme("VIOLETA", Color(0xFFB026FF), Color(0xFF00F0FF), Color(0xFFFF2A6D), Color(0xFF09060F), Color(0xFF110C1A), Color(0xFF1A1426))
+    NeonTheme("VIOLETA", Color(0xFFB026FF), Color(0xFF00F0FF), Color(0xFFFF2A6D), Color(0xFF09060F), Color(0xFF110C1A), Color(0xFF1A1426)),
+    NeonTheme("CARMESÍ", Color(0xFFFF1F3D), Color(0xFFFFB300), Color(0xFF00E5FF), Color(0xFF0A0506), Color(0xFF140C0E), Color(0xFF1E1214)),
+    NeonTheme("ZAFIRO", Color(0xFF3D7BFF), Color(0xFFFF2A6D), Color(0xFFFFEA00), Color(0xFF05070F), Color(0xFF0B0F1C), Color(0xFF121828)),
+    NeonTheme("ESMERALDA", Color(0xFF00E676), Color(0xFF00B8D4), Color(0xFFFF5252), Color(0xFF040A07), Color(0xFF0A140F), Color(0xFF101E17)),
+    NeonTheme("OCÉANO", Color(0xFF00BFA5), Color(0xFFFFAB40), Color(0xFFFF5252), Color(0xFF040B0B), Color(0xFF0A1515), Color(0xFF102020)),
+    NeonTheme("ATARDECER", Color(0xFFFF6E40), Color(0xFFE040FB), Color(0xFFFFEA00), Color(0xFF0C0607), Color(0xFF160D10), Color(0xFF20151A)),
+    NeonTheme("FUCSIA", Color(0xFFE040FB), Color(0xFF64FFDA), Color(0xFFFFEA00), Color(0xFF0B050D), Color(0xFF160B1A), Color(0xFF201026)),
+    NeonTheme("MENTA", Color(0xFF64FFDA), Color(0xFFFF80AB), Color(0xFFFF5252), Color(0xFF050B0A), Color(0xFF0B1514), Color(0xFF12201E)),
+    NeonTheme("ÁMBAR", Color(0xFFFFB300), Color(0xFF7C4DFF), Color(0xFFFF1744), Color(0xFF0B0804), Color(0xFF15100A), Color(0xFF1F1810)),
+    NeonTheme("MONOCROMO", Color(0xFFE0E0E0), Color(0xFF9E9E9E), Color(0xFFFF5252), Color(0xFF000000), Color(0xFF0D0D0D), Color(0xFF161616))
 )
 
 /** Colores actuales de la app. Al cambiar [themeIndex] toda la interfaz se redibuja con la nueva paleta. */

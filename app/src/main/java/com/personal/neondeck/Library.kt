@@ -1,15 +1,14 @@
 package com.personal.neondeck
 
-import android.content.ContentUris
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
 import android.provider.DocumentsContract
-import android.provider.MediaStore
-import android.util.Size
+import androidx.activity.result.contract.ActivityResultContract
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -19,129 +18,263 @@ data class Track(
     val artist: String,
     val album: String,
     val durationMs: Long,
-    val albumId: Long,
     val uri: Uri,
+    /** Ruta de la subcarpeta dentro de la carpeta elegida ("/" = la carpeta elegida en sí). */
     val folder: String
 )
 
-/** En Android 9 o menor la carpeta viene completa (/storage/emulated/0/Music/...); la dejamos como "Music/...". */
-@Suppress("DEPRECATION")
-private fun toRelativePath(fullPath: String): String {
-    val root = Environment.getExternalStorageDirectory().absolutePath
-    return if (fullPath.startsWith(root)) fullPath.removePrefix(root).trim('/')
-    else fullPath.replace(Regex("^/storage/[^/]+/"), "").trim('/')
+// ───────────────────────── Acceso limitado a UNA carpeta ─────────────────────────
+
+/**
+ * Selector de carpeta de Android pidiendo SOLO lectura.
+ * La app no pide ningún permiso de almacenamiento: lo único que puede ver es la carpeta que elijas aquí.
+ */
+class PickMusicFolder : ActivityResultContract<Unit?, Uri?>() {
+    override fun createIntent(context: Context, input: Unit?): Intent =
+        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+        )
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Uri? =
+        if (resultCode == Activity.RESULT_OK) intent?.data else null
 }
 
-/** ¿La canción está en la carpeta [f] o en una de sus subcarpetas? Con "" cuenta toda la música. */
-fun Track.inFolder(f: String): Boolean =
-    f.isEmpty() || folder.equals(f, ignoreCase = true) || folder.startsWith("$f/", ignoreCase = true)
+/** ¿Sigue vigente el permiso de lectura sobre esa carpeta? (Android lo quita si la carpeta se borra o se revoca.) */
+fun hasFolderAccess(ctx: Context, uri: Uri): Boolean =
+    try {
+        ctx.contentResolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+    } catch (_: Exception) {
+        false
+    }
 
-/** Convierte la carpeta que elige el usuario con el selector de Android en una ruta tipo "Music/Rock". */
-fun treeUriToPath(uri: Uri): String? {
+/**
+ * Guarda el permiso de lectura de la carpeta elegida y SUELTA cualquier permiso de una carpeta anterior,
+ * para que la app nunca tenga acceso a más de una carpeta a la vez.
+ */
+fun saveFolderAccess(ctx: Context, uri: Uri): Boolean =
+    try {
+        val resolver = ctx.contentResolver
+        val both = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        resolver.persistedUriPermissions.forEach { p ->
+            if (p.uri != uri) {
+                try { resolver.releasePersistableUriPermission(p.uri, both) } catch (_: Exception) {}
+            }
+        }
+        resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+/** Nombre corto de la carpeta elegida, para mostrarlo en pantalla. */
+fun folderLabel(uri: Uri?): String {
+    if (uri == null) return ""
     return try {
         val docId = DocumentsContract.getTreeDocumentId(uri)
-        when {
-            docId.contains(':') -> docId.substringAfter(':').trim('/')
-            docId.equals("downloads", ignoreCase = true) -> "Download"
-            else -> ""
-        }
+        val name = docId.substringAfter(':', docId).trim('/').substringAfterLast('/')
+        sanitizeText(name, "RAÍZ", 40)
     } catch (_: Exception) {
-        null
+        "CARPETA"
     }
 }
+
+// ───────────────────────── Texto seguro (metadatos = texto plano) ─────────────────────────
+
+private const val MAX_TEXT = 120
+
+private fun isUnsafeCodePoint(cp: Int): Boolean =
+    when (Character.getType(cp)) {
+        // Controles (\u0000, \u001B…), formato invisible (bidi, ancho cero, BOM), uso privado, sin asignar
+        Character.CONTROL.toInt(),
+        Character.FORMAT.toInt(),
+        Character.PRIVATE_USE.toInt(),
+        Character.SURROGATE.toInt(),
+        Character.UNASSIGNED.toInt() -> true
+        else -> false
+    }
+
+/**
+ * Limpia un texto que viene de un archivo (título, artista, álbum, nombre de archivo o carpeta).
+ *  - Se usa SIEMPRE como texto plano: jamás se interpreta como HTML, ruta, consulta ni comando.
+ *  - Quita caracteres de control y caracteres invisibles que cambian el sentido del texto (RLO/LRO, ancho cero…).
+ *  - Los saltos de línea y tabulaciones pasan a ser un espacio, y los espacios repetidos se juntan.
+ *  - Limita el largo para que un título gigante no rompa la pantalla ni la notificación.
+ */
+fun sanitizeText(raw: String?, fallback: String, max: Int = MAX_TEXT): String {
+    if (raw.isNullOrEmpty()) return fallback
+    val sb = StringBuilder(minOf(raw.length, max))
+    var lastWasSpace = true // evita espacios al inicio
+    var i = 0
+    while (i < raw.length && sb.length < max) {
+        val cp = raw.codePointAt(i)
+        i += Character.charCount(cp)
+        if (Character.isWhitespace(cp) || Character.isSpaceChar(cp)) {
+            if (!lastWasSpace) {
+                sb.append(' ')
+                lastWasSpace = true
+            }
+            continue
+        }
+        if (isUnsafeCodePoint(cp)) continue
+        sb.appendCodePoint(cp)
+        lastWasSpace = false
+    }
+    val out = sb.toString().trim()
+    return if (out.isEmpty()) fallback else out
+}
+
+// ───────────────────────── Lectura de la carpeta y de los metadatos ─────────────────────────
+
+private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "ogg", "opus", "wav")
+private const val MAX_FILES = 20000   // tope de seguridad: no recorre carpetas infinitas
+private const val MAX_DEPTH = 12      // tope de subcarpetas
+private const val MIN_DURATION_MS = 40000L // ignora sonidos muy cortos (tonos, avisos)
+
+private class Scan(val ctx: Context, val treeUri: Uri, val retriever: MediaMetadataRetriever) {
+    val out = ArrayList<Track>()
+    var visited = 0
+}
+
+private fun stableId(s: String): Long {
+    // FNV-1a de 64 bits: mismo archivo = mismo id entre sesiones
+    var h = -3750763034362895579L
+    for (ch in s) {
+        h = h xor ch.code.toLong()
+        h *= 1099511628211L
+    }
+    return h and Long.MAX_VALUE
+}
+
+private fun isAudioFile(name: String, mime: String): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase()
+    return mime.startsWith("audio/") || ext in AUDIO_EXT
+}
+
+/** Lee SOLO la carpeta elegida (y sus subcarpetas) con el permiso que dio el usuario. */
+fun loadTracks(ctx: Context, treeUri: Uri): List<Track> {
+    val rootId = try {
+        DocumentsContract.getTreeDocumentId(treeUri)
+    } catch (_: Exception) {
+        return emptyList()
+    }
+    val retriever = MediaMetadataRetriever()
+    val scan = Scan(ctx, treeUri, retriever)
+    try {
+        walk(scan, rootId, "/", 0)
+    } catch (_: Exception) {
+        // Si algo falla a medias devolvemos lo que ya se leyó
+    } finally {
+        try { retriever.release() } catch (_: Exception) {}
+    }
+    return scan.out
+        .distinctBy { it.id }
+        .sortedBy { it.title.lowercase() }
+}
+
+private fun walk(scan: Scan, parentDocId: String, relPath: String, depth: Int) {
+    if (depth > MAX_DEPTH || scan.visited >= MAX_FILES) return
+
+    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(scan.treeUri, parentDocId)
+    val projection = arrayOf(
+        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+        DocumentsContract.Document.COLUMN_MIME_TYPE
+    )
+    val dirs = ArrayList<Pair<String, String>>()   // docId, nombre
+    val files = ArrayList<Triple<String, String, String>>() // docId, nombre, mime
+
+    try {
+        scan.ctx.contentResolver.query(childrenUri, projection, null, null, null)?.use { c ->
+            while (c.moveToNext()) {
+                val docId = c.getString(0) ?: continue
+                val name = c.getString(1).orEmpty()
+                val mime = c.getString(2).orEmpty()
+                if (name.startsWith(".")) continue // carpetas y archivos ocultos
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) dirs.add(docId to name)
+                else files.add(Triple(docId, name, mime))
+            }
+        }
+    } catch (_: Exception) {
+        return
+    }
+
+    for ((docId, name, mime) in files) {
+        if (scan.visited >= MAX_FILES) return
+        if (!isAudioFile(name, mime)) continue
+        scan.visited++
+        readTrack(scan, docId, name, relPath)?.let { scan.out.add(it) }
+    }
+    for ((docId, name) in dirs) {
+        if (scan.visited >= MAX_FILES) return
+        val child = sanitizeText(name, "?", 60)
+        val childPath = if (relPath == "/") child else "$relPath/$child"
+        walk(scan, docId, childPath, depth + 1)
+    }
+}
+
+private fun readTrack(scan: Scan, docId: String, fileName: String, relPath: String): Track? {
+    val docUri = DocumentsContract.buildDocumentUriUsingTree(scan.treeUri, docId)
+
+    var title: String? = null
+    var artist: String? = null
+    var album: String? = null
+    var duration = 0L
+    try {
+        val r = scan.retriever
+        r.setDataSource(scan.ctx, docUri)
+        title = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+        artist = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+        album = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+        duration = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+    } catch (_: Exception) {
+        // Sin metadatos legibles: usamos el nombre del archivo
+    }
+
+    if (duration in 1L until MIN_DURATION_MS) return null
+
+    val baseName = fileName.substringBeforeLast('.', fileName)
+    return Track(
+        id = stableId(docUri.toString()),
+        // Todo lo que viene del archivo pasa por sanitizeText: se trata como texto plano
+        title = sanitizeText(title, sanitizeText(baseName, "Sin título")),
+        artist = sanitizeText(artist, "Artista desconocido"),
+        album = sanitizeText(album, ""),
+        durationMs = duration,
+        uri = docUri,
+        folder = relPath
+    )
+}
+
+/** ¿La canción está en la subcarpeta [f] o dentro de ella? Con "" cuenta toda la carpeta elegida. */
+fun Track.inFolder(f: String): Boolean =
+    f.isEmpty() || folder.equals(f, ignoreCase = true) || folder.startsWith("$f/", ignoreCase = true)
 
 fun formatTime(ms: Long): String {
     val total = (ms.coerceAtLeast(0L)) / 1000
     return "%d:%02d".format(total / 60, total % 60)
 }
 
-/** Lee la música del teléfono (la que está en el almacenamiento, incluida la carpeta Música). */
-fun loadTracks(ctx: Context): List<Track> {
-    val collection: Uri =
-        if (Build.VERSION.SDK_INT >= 29) MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-
-    // Carpeta de cada canción: RELATIVE_PATH en Android 10+, y la ruta completa en versiones anteriores
-    @Suppress("DEPRECATION")
-    val folderCol =
-        if (Build.VERSION.SDK_INT >= 29) MediaStore.Audio.Media.RELATIVE_PATH
-        else MediaStore.Audio.Media.DATA
-
-    val projection = arrayOf(
-        MediaStore.Audio.Media._ID,
-        MediaStore.Audio.Media.TITLE,
-        MediaStore.Audio.Media.ARTIST,
-        MediaStore.Audio.Media.ALBUM,
-        MediaStore.Audio.Media.DURATION,
-        MediaStore.Audio.Media.ALBUM_ID,
-        folderCol
-    )
-
-    // Excluye tonos, alarmas y notificaciones, y audios muy cortos
-    val selection = "${MediaStore.Audio.Media.IS_RINGTONE} = 0 AND " +
-        "${MediaStore.Audio.Media.IS_ALARM} = 0 AND " +
-        "${MediaStore.Audio.Media.IS_NOTIFICATION} = 0 AND " +
-        "${MediaStore.Audio.Media.DURATION} >= 40000"
-
-    val out = ArrayList<Track>()
-    try {
-        ctx.contentResolver.query(
-            collection,
-            projection,
-            selection,
-            null,
-            "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
-        )?.use { c ->
-            val iId = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-            val iTitle = c.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-            val iArtist = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
-            val iAlbum = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
-            val iDur = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-            val iAlbumId = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
-            val iFolder = c.getColumnIndexOrThrow(folderCol)
-            while (c.moveToNext()) {
-                val id = c.getLong(iId)
-                val rawFolder = c.getString(iFolder).orEmpty()
-                val folder = (
-                    if (Build.VERSION.SDK_INT >= 29) rawFolder.trim('/')
-                    else toRelativePath(rawFolder.substringBeforeLast('/', ""))
-                    ).ifEmpty { "/" }
-                val artist = c.getString(iArtist)?.takeIf { it != "<unknown>" } ?: "Artista desconocido"
-                out.add(
-                    Track(
-                        id = id,
-                        title = c.getString(iTitle) ?: "Sin título",
-                        artist = artist,
-                        album = c.getString(iAlbum) ?: "",
-                        durationMs = c.getLong(iDur),
-                        albumId = c.getLong(iAlbumId),
-                        uri = ContentUris.withAppendedId(collection, id),
-                        folder = folder
-                    )
-                )
-            }
-        }
-    } catch (_: Exception) {
-        // Sin permiso o sin acceso: devolvemos lo que haya
-    }
-    return out
-}
-
-fun albumArtUri(albumId: Long): Uri =
-    ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), albumId)
-
-/** Carátula del álbum. Devuelve null si la canción no tiene. */
+/** Carátula incrustada en el archivo (si la tiene). Se reduce para no gastar memoria. */
 suspend fun loadArt(ctx: Context, track: Track?): Bitmap? = withContext(Dispatchers.IO) {
     if (track == null) return@withContext null
+    val r = MediaMetadataRetriever()
     try {
-        if (Build.VERSION.SDK_INT >= 29) {
-            ctx.contentResolver.loadThumbnail(track.uri, Size(720, 720), null)
-        } else {
-            ctx.contentResolver.openInputStream(albumArtUri(track.albumId))?.use {
-                BitmapFactory.decodeStream(it)
-            }
-        }
+        r.setDataSource(ctx, track.uri)
+        val bytes = r.embeddedPicture ?: return@withContext null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
+        if (maxSide <= 0) return@withContext null
+        var sample = 1
+        while (maxSide / sample > 1024) sample *= 2
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
     } catch (_: Exception) {
         null
+    } catch (_: OutOfMemoryError) {
+        null
+    } finally {
+        try { r.release() } catch (_: Exception) {}
     }
 }

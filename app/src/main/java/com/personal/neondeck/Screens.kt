@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -113,49 +114,59 @@ private fun NeonRoot() {
         onDispose { pc.release() }
     }
 
-    // Permisos: leer música (y mostrar la notificación en Android 13+)
-    val audioPerm =
-        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
-        else Manifest.permission.READ_EXTERNAL_STORAGE
-    var granted by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(ctx, audioPerm) == PackageManager.PERMISSION_GRANTED)
+    // Ajustes que se recuerdan: carpeta de música elegida, subcarpeta activa, alias y tema de color
+    val uiPrefs = remember { appCtx.getSharedPreferences("neon_ui", Context.MODE_PRIVATE) }
+    val scope = rememberCoroutineScope()
+
+    // ACCESO LIMITADO: la app no pide permiso de almacenamiento. Solo puede leer la carpeta que el usuario elige.
+    // Si todavía no hay carpeta (o Android ya retiró el permiso), se muestra la pantalla que obliga a elegirla.
+    var treeUri by remember {
+        mutableStateOf(
+            uiPrefs.getString("tree_uri", null)
+                ?.let { Uri.parse(it) }
+                ?.takeIf { hasFolderAccess(appCtx, it) }
+        )
     }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-        granted = result[audioPerm] == true ||
-            ContextCompat.checkSelfPermission(ctx, audioPerm) == PackageManager.PERMISSION_GRANTED
-    }
-    val askPermissions = {
-        val list = mutableListOf(audioPerm)
-        if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.POST_NOTIFICATIONS)
-        launcher.launch(list.toTypedArray())
-    }
-    LaunchedEffect(Unit) { if (!granted) askPermissions() }
+    var subfolder by remember { mutableStateOf(uiPrefs.getString("subfolder", "") ?: "") }
+    var alias by remember { mutableStateOf(uiPrefs.getString("alias", "") ?: "") }
 
     // Biblioteca
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
-    LaunchedEffect(granted, reloadKey) {
-        if (granted) {
-            tracks = withContext(Dispatchers.IO) { loadTracks(appCtx) }
+    LaunchedEffect(treeUri, reloadKey) {
+        val t = treeUri
+        if (t != null) {
+            loaded = false
+            tracks = withContext(Dispatchers.IO) { loadTracks(appCtx, t) }
             loaded = true
         }
     }
-    // Ajustes que se recuerdan: carpeta elegida ("" = toda la música), alias y tema de color
-    val uiPrefs = remember { appCtx.getSharedPreferences("neon_ui", Context.MODE_PRIVATE) }
-    var folder by remember { mutableStateOf(uiPrefs.getString("folder", "") ?: "") }
-    var alias by remember { mutableStateOf(uiPrefs.getString("alias", "") ?: "") }
-    val scope = rememberCoroutineScope()
 
-    val chooseFolder: (String) -> Unit = { path ->
-        folder = path
-        uiPrefs.edit().putString("folder", path).apply()
+    val chooseSubfolder: (String) -> Unit = { path ->
+        subfolder = path
+        uiPrefs.edit().putString("subfolder", path).apply()
     }
-    // Selector de carpetas de Android: no necesita ningún permiso extra
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            val path = treeUriToPath(uri)
-            if (path != null) chooseFolder(path)
+    val folderPicker = rememberLauncherForActivityResult(PickMusicFolder()) { uri ->
+        if (uri != null && saveFolderAccess(appCtx, uri)) {
+            // Al cambiar de carpeta se detiene lo que sonaba: el permiso de la carpeta anterior ya se soltó
+            pc.stopAndClear()
+            tracks = emptyList()
+            loaded = false
+            treeUri = uri
+            subfolder = ""
+            uiPrefs.edit().putString("tree_uri", uri.toString()).putString("subfolder", "").apply()
+            reloadKey++
+        }
+    }
+
+    // Notificaciones (Android 13+): se piden una vez que ya hay carpeta elegida
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(treeUri) {
+        if (treeUri != null && Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -188,55 +199,92 @@ private fun NeonRoot() {
     var tab by rememberSaveable { mutableStateOf(0) }
 
     Column(Modifier.fillMaxSize().cyberBackground()) {
-        Header(avatar = avatar, alias = alias, onProfile = { tab = 3 })
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            when (tab) {
-                0 -> LibraryScreen(
-                    tracks = tracks,
-                    loaded = loaded,
-                    granted = granted,
-                    currentId = pc.mediaId,
-                    folder = folder,
-                    onFolder = chooseFolder,
-                    onPickFolder = { folderPicker.launch(null) },
-                    onAsk = { askPermissions() },
-                    onReload = { reloadKey++ },
-                    onPlay = { list, index, shuffleOn ->
-                        pc.playQueue(list, index, shuffleOn)
-                        if (shuffleOn == true) tab = 1
-                    }
-                )
-                1 -> PlayerScreen(pc = pc, art = art)
-                2 -> AudioScreen()
-                else -> ProfileScreen(
-                    avatar = avatar,
-                    alias = alias,
-                    onAlias = {
-                        alias = it
-                        uiPrefs.edit().putString("alias", it).apply()
-                    },
-                    onPickAvatar = {
-                        avatarPicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                    onRemoveAvatar = {
-                        deleteAvatar(appCtx)
-                        avatar = null
-                    },
-                    trackCount = tracks.size,
-                    folderCount = tracks.map { it.folder }.distinct().size,
-                    onTheme = {
-                        Cy.themeIndex = it
-                        uiPrefs.edit().putInt("theme", it).apply()
-                    }
-                )
+        if (treeUri == null) {
+            FolderGate(onPick = { folderPicker.launch(null) })
+        } else {
+            Header(avatar = avatar, alias = alias, onProfile = { tab = 3 })
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                when (tab) {
+                    0 -> LibraryScreen(
+                        tracks = tracks,
+                        loaded = loaded,
+                        currentId = pc.mediaId,
+                        rootName = folderLabel(treeUri),
+                        folder = subfolder,
+                        onFolder = chooseSubfolder,
+                        onPickFolder = { folderPicker.launch(null) },
+                        onReload = { reloadKey++ },
+                        onPlay = { list, index, shuffleOn ->
+                            pc.playQueue(list, index, shuffleOn)
+                            if (shuffleOn == true) tab = 1
+                        }
+                    )
+                    1 -> PlayerScreen(pc = pc, art = art)
+                    2 -> AudioScreen()
+                    else -> ProfileScreen(
+                        avatar = avatar,
+                        alias = alias,
+                        onAlias = {
+                            alias = it
+                            uiPrefs.edit().putString("alias", it).apply()
+                        },
+                        onPickAvatar = {
+                            avatarPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        onRemoveAvatar = {
+                            deleteAvatar(appCtx)
+                            avatar = null
+                        },
+                        trackCount = tracks.size,
+                        folderCount = tracks.map { it.folder }.distinct().size,
+                        onTheme = {
+                            Cy.themeIndex = it
+                            uiPrefs.edit().putInt("theme", it).apply()
+                        }
+                    )
+                }
             }
+            if (tab != 1 && pc.mediaId != null) {
+                MiniPlayer(pc = pc, onOpen = { tab = 1 })
+            }
+            NavBar(selected = tab, onSelect = { tab = it })
         }
-        if (tab != 1 && pc.mediaId != null) {
-            MiniPlayer(pc = pc, onOpen = { tab = 1 })
+    }
+}
+
+// ───────────────────────── Pantalla obligatoria: elegir carpeta de música ─────────────────────────
+
+@Composable
+private fun FolderGate(onPick: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        GlitchText("NEON//DECK", tx(26.sp, Cy.Primary, Orbitron, FontWeight.Bold, 2.sp))
+        Spacer(Modifier.height(18.dp))
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .cutPanel()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("ELIGE TU CARPETA DE MÚSICA", style = tx(18.sp, Cy.Alert, Orbitron, FontWeight.Bold, 2.sp))
+            Text(
+                "Para empezar tienes que elegir la carpeta donde está tu música. " +
+                    "NeonDeck solo podrá leer esa carpeta (y sus subcarpetas): no tiene acceso al resto de tu teléfono.",
+                style = tx(16.sp, Cy.Text, Rajdhani, FontWeight.Medium)
+            )
+            Text(
+                "Luego pulsa USAR ESTA CARPETA en el selector de Android.",
+                style = tx(14.sp, Cy.Dim, Rajdhani, FontWeight.Medium)
+            )
+            CyberTextButton("ELEGIR CARPETA", onPick, filled = true)
         }
-        NavBar(selected = tab, onSelect = { tab = it })
     }
 }
 
@@ -392,12 +440,11 @@ private fun folderName(path: String): String =
 private fun LibraryScreen(
     tracks: List<Track>,
     loaded: Boolean,
-    granted: Boolean,
     currentId: String?,
+    rootName: String,
     folder: String,
     onFolder: (String) -> Unit,
     onPickFolder: () -> Unit,
-    onAsk: () -> Unit,
     onReload: () -> Unit,
     onPlay: (List<Track>, Int, Boolean?) -> Unit
 ) {
@@ -466,24 +513,14 @@ private fun LibraryScreen(
                 .padding(horizontal = 16.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Abre el selector de carpetas de Android
-            CyberTextButton(label = "ELEGIR CARPETA", onClick = onPickFolder, color = Cy.Primary)
+            // Cambiar la carpeta de música: abre el selector de Android y reemplaza el permiso anterior
+            CyberTextButton(label = "CAMBIAR CARPETA", onClick = onPickFolder, color = Cy.Primary)
             CyberTextButton(
                 label = "TODO (${tracks.size})",
                 onClick = { onFolder("") },
                 color = Cy.Secondary,
                 filled = folder.isEmpty()
             )
-            // Carpeta elegida con el selector que no coincide con ninguna de la lista (por ejemplo, una carpeta madre)
-            val custom = folder.isNotEmpty() && folders.none { it.first.equals(folder, ignoreCase = true) }
-            if (custom) {
-                CyberTextButton(
-                    label = "${folderName(folder).uppercase()} (${inFolder.size})",
-                    onClick = {},
-                    color = Cy.Secondary,
-                    filled = true
-                )
-            }
             for ((path, count) in folders) {
                 CyberTextButton(
                     label = "${folderName(path).uppercase()} ($count)",
@@ -495,27 +532,26 @@ private fun LibraryScreen(
         }
 
         Text(
-            "${filtered.size} PISTAS",
+            "${rootName.uppercase()}  ·  ${filtered.size} PISTAS",
             style = tx(12.sp, Cy.Dim, Rajdhani, FontWeight.Bold, 2.sp),
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 2.dp)
         )
 
         when {
-            !granted -> InfoPanel(
-                title = "ACCESO DENEGADO",
-                text = "Necesito permiso para leer la música de tu teléfono.",
-                button = "CONCEDER ACCESO",
-                onButton = onAsk
+            !loaded -> Text(
+                "ESCANEANDO CARPETA…",
+                style = tx(14.sp, Cy.Secondary, Rajdhani, FontWeight.Bold, 2.sp),
+                modifier = Modifier.padding(18.dp)
             )
             loaded && tracks.isEmpty() -> InfoPanel(
                 title = "SIN SEÑAL",
-                text = "No encontré canciones. Copia archivos de audio (MP3, FLAC, M4A…) a tu teléfono y pulsa el botón de recargar.",
-                button = "RECARGAR",
-                onButton = onReload
+                text = "No encontré canciones en la carpeta elegida. Revisa que tenga archivos de audio (MP3, FLAC, M4A…) o elige otra carpeta.",
+                button = "CAMBIAR CARPETA",
+                onButton = onPickFolder
             )
             loaded && inFolder.isEmpty() -> InfoPanel(
                 title = "CARPETA VACÍA",
-                text = "No encontré canciones en esa carpeta. Android solo muestra la música que ya tiene registrada: prueba con otra carpeta o pulsa recargar.",
+                text = "No encontré canciones en esa subcarpeta. Prueba con otra o vuelve a ver todo.",
                 button = "VER TODO",
                 onButton = { onFolder("") }
             )

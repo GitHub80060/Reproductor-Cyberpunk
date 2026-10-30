@@ -1,6 +1,7 @@
 package com.personal.neondeck
 
 import android.app.PendingIntent
+import android.content.ContentResolver
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -83,12 +84,14 @@ class MusicService : MediaSessionService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> {
-            val resolved = mediaItems.map { item ->
-                val uri = item.requestMetadata.mediaUri
-                if (item.localConfiguration == null && uri != null) {
-                    item.buildUpon().setUri(uri).build()
-                } else {
-                    item
+            // Solo aceptamos canciones con dirección content:// (las de la carpeta elegida).
+            // Se descartan file://, http:// y cualquier otra cosa que intente colarse desde otra app.
+            val resolved = mediaItems.mapNotNull { item ->
+                val uri = item.localConfiguration?.uri ?: item.requestMetadata.mediaUri
+                when {
+                    uri == null || uri.scheme != ContentResolver.SCHEME_CONTENT -> null
+                    item.localConfiguration == null -> item.buildUpon().setUri(uri).build()
+                    else -> item
                 }
             }.toMutableList()
             return Futures.immediateFuture(resolved)
