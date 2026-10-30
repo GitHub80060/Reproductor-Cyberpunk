@@ -112,6 +112,15 @@ class PlayerController(private val ctx: Context) : Player.Listener {
         c.play()
     }
 
+    /** Deja cargada la lista en la canción y posición indicadas, SIN empezar a sonar. */
+    fun restoreQueue(tracks: List<Track>, index: Int, positionMs: Long) {
+        val c = controller ?: return
+        if (index !in tracks.indices) return
+        c.setMediaItems(tracks.map { it.toMediaItem() }, index, positionMs.coerceAtLeast(0L))
+        lastQueue = tracks.map { it.id }
+        c.prepare()
+    }
+
     /** Detiene todo y vacía la lista (se usa al cambiar de carpeta, porque el permiso de la anterior se suelta). */
     fun stopAndClear() {
         val c = controller ?: return

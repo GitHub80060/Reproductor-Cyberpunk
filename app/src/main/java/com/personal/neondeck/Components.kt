@@ -53,6 +53,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.sin
 
+/** Igual que clickable, pero reproduce el sonido de menú (si está activado en PERFIL). */
+fun Modifier.clickableFx(onClick: () -> Unit): Modifier = this.clickable {
+    UiSound.play()
+    onClick()
+}
+
 // ───────────────────────── Paleta y tipografía ─────────────────────────
 
 /** Un tema de color: acento principal, acento secundario, color de alerta y fondos. */
@@ -325,7 +331,7 @@ fun CyberIconButton(
             .clip(shape)
             .background(if (filled) color else Color.Transparent)
             .border(1.5.dp, color, shape)
-            .clickable(onClick = onClick),
+            .clickableFx(onClick),
         contentAlignment = Alignment.Center
     ) {
         CyberIcon(ico, if (filled) Cy.Bg else color, Modifier.size(iconSize))
@@ -347,7 +353,7 @@ fun CyberTextButton(
             .clip(shape)
             .background(if (filled) color else Color.Transparent)
             .border(1.5.dp, color, shape)
-            .clickable(onClick = onClick),
+            .clickableFx(onClick),
         contentAlignment = Alignment.Center
     ) {
         Text(

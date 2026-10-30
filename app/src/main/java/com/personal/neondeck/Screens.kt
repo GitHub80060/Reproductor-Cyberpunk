@@ -188,12 +188,47 @@ private fun NeonRoot() {
         value = loadArt(appCtx, current)
     }
 
-    // Avance de la barra de progreso mientras suena
+    // Recuerda la última canción y su posición, para encontrarla igual al volver a abrir la app
+    val savePosition = {
+        val id = pc.mediaId
+        if (id != null) {
+            uiPrefs.edit().putString("last_pos_id", id).putLong("last_pos", pc.position).apply()
+        }
+    }
+    LaunchedEffect(pc.mediaId) {
+        pc.mediaId?.let { uiPrefs.edit().putString("last_id", it).apply() }
+    }
+
+    // Al abrir la app (si no hay nada sonando) deja cargada la última canción, en pausa
+    var restored by remember { mutableStateOf(false) }
+    LaunchedEffect(loaded, pc.connected, tracks) {
+        if (!restored && loaded && pc.connected && tracks.isNotEmpty()) {
+            restored = true
+            if (pc.mediaId == null) {
+                val lastId = uiPrefs.getString("last_id", null)
+                var list = tracks.filter { it.inFolder(subfolder) }
+                var index = list.indexOfFirst { it.id.toString() == lastId }
+                if (index < 0) {
+                    list = tracks
+                    index = list.indexOfFirst { it.id.toString() == lastId }
+                }
+                if (lastId != null && index >= 0) {
+                    val pos = if (uiPrefs.getString("last_pos_id", null) == lastId) uiPrefs.getLong("last_pos", 0L) else 0L
+                    pc.restoreQueue(list, index, pos)
+                }
+            }
+        }
+    }
+
+    // Avance de la barra de progreso mientras suena (y guarda la posición cada pocos segundos)
     LaunchedEffect(pc.playing) {
+        var ticks = 0
         while (pc.playing) {
             pc.refreshPosition()
+            if (++ticks % 20 == 0) savePosition()
             delay(250)
         }
+        savePosition() // al pausar
     }
 
     var tab by rememberSaveable { mutableStateOf(0) }
@@ -317,7 +352,7 @@ private fun Header(avatar: Bitmap?, alias: String, onProfile: () -> Unit) {
                 .background(Cy.Alert.copy(alpha = blink.value))
         )
         Spacer(Modifier.width(12.dp))
-        AvatarBadge(avatar, alias, 42.dp, Modifier.clickable(onClick = onProfile))
+        AvatarBadge(avatar, alias, 42.dp, Modifier.clickableFx(onProfile))
     }
     Box(
         Modifier
@@ -382,7 +417,7 @@ private fun NavItem(label: String, ico: Ico, active: Boolean, modifier: Modifier
             .clip(shape)
             .background(if (active) Cy.Primary else Color.Transparent)
             .border(1.dp, if (active) Cy.Primary else Cy.Dim.copy(alpha = 0.4f), shape)
-            .clickable(onClick = onClick),
+            .clickableFx(onClick),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -399,7 +434,7 @@ private fun MiniPlayer(pc: PlayerController, onOpen: () -> Unit) {
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .cutPanel(border = Cy.Primary.copy(alpha = 0.6f), fill = Cy.Panel2, cut = 12.dp)
-            .clickable(onClick = onOpen)
+            .clickableFx(onOpen)
             .padding(start = 14.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -591,7 +626,7 @@ private fun TrackRow(index: Int, track: Track, active: Boolean, onClick: () -> U
         Modifier
             .fillMaxWidth()
             .background(if (active) Cy.Primary.copy(alpha = 0.08f) else Color.Transparent)
-            .clickable(onClick = onClick)
+            .clickableFx(onClick)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -955,6 +990,23 @@ private fun ProfileScreen(
             StatBox("CARPETAS", folderCount.toString(), Cy.Secondary, Modifier.weight(1f))
         }
 
+        // Sonido de menú (se puede apagar)
+        Row(
+            Modifier.fillMaxWidth().cutPanel().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("SONIDO DE MENÚ", style = tx(14.sp, Cy.Text, Rajdhani, FontWeight.Bold, 1.sp))
+                Text("Efecto al tocar opciones y canciones", style = tx(12.sp, Cy.Dim, Rajdhani, FontWeight.Medium))
+            }
+            CyberTextButton(
+                label = if (UiSound.enabled) "ACTIVADO" else "DESACTIVADO",
+                onClick = { UiSound.toggle() },
+                color = if (UiSound.enabled) Cy.Primary else Cy.Dim,
+                filled = UiSound.enabled
+            )
+        }
+
         // Temas de color
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("COLORES", style = tx(13.sp, Cy.Dim, Rajdhani, FontWeight.Bold, 2.sp))
@@ -998,7 +1050,7 @@ private fun ThemeCard(theme: NeonTheme, selected: Boolean, modifier: Modifier = 
                 if (selected) theme.primary else Cy.Dim.copy(alpha = 0.4f),
                 shape
             )
-            .clickable(onClick = onClick)
+            .clickableFx(onClick)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

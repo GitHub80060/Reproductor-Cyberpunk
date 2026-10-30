@@ -15,6 +15,8 @@ Reproductor de música para Android con estética cyberpunk (amarillo, cian y ro
 - Pausa sola si desconectas los audífonos.
 - **Acceso limitado (v1.2):** al abrir la app por primera vez te obliga a elegir la carpeta donde está tu música. Solo se guarda permiso de **lectura** sobre esa carpeta (y sus subcarpetas); no hay permisos de almacenamiento ni de internet. Si cambias de carpeta, el permiso de la anterior se suelta. En LISTA, `CAMBIAR CARPETA` abre el selector otra vez y hay botones por subcarpeta y `TODO`.
 - **Metadatos seguros:** título, artista y álbum se leen de las etiquetas del MP3 (si no tiene, se usa el nombre del archivo) y se tratan siempre como **texto plano**: se quitan caracteres de control e invisibles, se limita el largo y nunca se interpretan como HTML, rutas ni comandos.
+- **Última canción:** si cierras la app y la vuelves a abrir, queda cargada la misma canción (en pausa y en el mismo punto) para seguir con un toque en play.
+- **Sonido de menú:** efecto cyberpunk al tocar botones, pestañas y canciones. Se activa o desactiva en PERFIL (`SONIDO DE MENÚ`). Se genera por código, no usa archivos de audio.
 - **Perfil:** sube tu foto de avatar (se recorta cuadrada y se guarda solo dentro de la app, no se sube a internet), escribe un alias y mira cuántas pistas y carpetas tienes. El avatar también aparece arriba a la derecha.
 - **Colores:** 15 temas (VOLT, ROSA NEÓN, ÁCIDO, ÁRTICO, SOLAR, VIOLETA, CARMESÍ, ZAFIRO, ESMERALDA, OCÉANO, ATARDECER, FUCSIA, MENTA, ÁMBAR, MONOCROMO) que cambian el fondo y los acentos de toda la app. Se eligen en PERFIL y se recuerdan.
 
